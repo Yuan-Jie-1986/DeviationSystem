@@ -10,6 +10,7 @@ import pymongo
 from constant import *
 from mysql import connector
 import matplotlib.pyplot as plt
+import pyecharts as pec
 
 
 
@@ -150,7 +151,6 @@ class deviation(object):
                     df_futures = df_temp.copy()
                 else:
                     df_futures = df_futures.join(df_temp, how='outer')
-
         df_futures['price_diff'] = eval(formula)
         return df_futures
 
@@ -206,6 +206,7 @@ class deviation(object):
         price_diff['season_deviation_%ddays' % rtn_len] = (price_diff['profit_rate'] - price_diff['profit_rate_mean']) \
                                                         / price_diff['profit_rate_std']
         # print price_diff[['price_diff', 'season_deviation_%ddays' % rtn_len]]
+        price_diff.to_clipboard()
         return price_diff[['price_diff', 'season_deviation_%ddays' % rtn_len]]
 
     def trend_devi(self, df, rtn_len):
@@ -233,7 +234,7 @@ class deviation(object):
             if df.empty:
                 df =  self.get_price(cmd + '_Daily', r)
             else:
-                df = df.append(self.get_price(cmd+ '_Daily', r))
+                df = df.append(self.get_price(cmd + '_Daily', r))
         df.rename(lambda x: x + '_' + month + '_' + cmd, axis='columns', inplace=True)
         return df
 
@@ -295,7 +296,7 @@ class deviation(object):
         ax = plt.gca()
         ax2 = plt.twinx()
         df_plot['price_diff'].plot(color='r')
-
+        print df_plot['price_diff'].tolist()
         plt.grid()
         plt.legend()
 
@@ -308,12 +309,51 @@ class deviation(object):
         print 'Spearman:', df_plot.corr(method='spearman')
         # plt.show()
 
+    def echart_devi_price(self, df, rtn_len, corr_len, mode='trend'):
+        line1 = pec.Line(str(self.cmd_list))
+        line2 = pec.Line()
+        line3 = pec.Line(str(self.cmd_list))
+        if mode == 'trend':
+            df_res = self.trend_devi(df, rtn_len)
+            df_res.dropna(how='all', inplace=True)
+            ds_ = df_res['trend_deviation_%ddays' % rtn_len].tolist()
+            df_corr = df_res['trend_deviation_%ddays' % rtn_len].rolling(window=corr_len, min_periods=corr_len-10).\
+                corr(df_res['price_diff'], pairwise=False)
+            df_corr = df_corr.to_frame('RollingCorr_%ddays' % corr_len)
+        elif mode == 'season':
+            df_res = self.season_devi(df, rtn_len)
+            df_res.dropna(how='all', inplace=True)
+            ds_ = df_res['season_deviation_%ddays' % rtn_len].tolist()
+            df_corr = df_res['season_deviation_%ddays' % rtn_len].rolling(window=corr_len, min_periods=corr_len-10).\
+                corr(df_res['price_diff'], pairwise=False)
+            df_corr = df_corr.to_frame('RollingCorr_%ddays' % corr_len)
+        else:
+            raise Exception(u'错误的参数输入')
+
+        dt_ = df_res.index.tolist()
+        price_ = df_res['price_diff'].tolist()
+        corr_ = df_corr['RollingCorr_%ddays' % corr_len].tolist()
+
+        line1.add('%s_deviation_%ddays' % (mode, rtn_len), dt_, ds_, is_datazoom_show=True, datazoom_type='both',
+                  tooltip_trigger='axis')
+
+        line2.add('price_diff', dt_, price_)
+
+        overlap = pec.Overlap()
+        overlap.add(line1)
+        overlap.add(line2, is_add_yaxis=True, yaxis_index=1)
+
+        line3.add('RollingCorr_%ddays' % corr_len, dt_, corr_, is_datazoom_show=True, datazoom_type='both',
+                  tooltip_trigger='axis')
+
+        return overlap, line3
+
+
     def basisData(self, file_nm, spot_list):
         spot = self.spotData(file_nm, spot_list)[['price_diff']]
         future = self.futuresMain()[['price_diff']]
         basis = spot - future
         return basis
-
 
 
 def get_price(collection, wind_code, mongo_host='localhost', mongo_port=27017, field='CLOSE'):
@@ -340,6 +380,7 @@ def get_price(collection, wind_code, mongo_host='localhost', mongo_port=27017, f
 
     df = pd.DataFrame({field: cls}, index=dt)
     return df
+
 
 class CorrelCalc(object):
 
@@ -380,9 +421,11 @@ if __name__ == '__main__':
 
     a = deviation(cmd_list=['L.DCE', 'PP.DCE'], formula=formula, needFex=0)
     # print a.season_devi(df=a.futuresMain(), rtn_len=60)
-    print a.futuresMain()
-    a.plot_devi_price(df=a.futuresMain(), rtn_len=60, corr_len=60, mode='trend')
-    plt.show()
+    # print a.futuresMain()
+    # a.plot_devi_price(df=a.futuresMain(), rtn_len=60, corr_len=60, mode='trend')
+    # plt.show()
+    a.echart_devi_price(a.futuresMain(), rtn_len=60, corr_len=60)
+    # a.plot_devi_price(a.futuresMain(), 60, 60)
 
     # a = deviation(cmd_list=['BU.SHF', 'TA.CZC'], formula=formula, needFex=0)
     # print a.spotData('raw_data', spot_list=['LL神华', 'PP华东'])
