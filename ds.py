@@ -11,6 +11,7 @@ from constant import *
 from mysql import connector
 import matplotlib.pyplot as plt
 import pyecharts as pec
+import sympy
 
 
 
@@ -25,16 +26,20 @@ class deviation(object):
 
         # 根据正则来查看formula中有多少个变量
         ptn = re.compile('(?<=var)\d+')
-        res =ptn.findall(self.formula)
+        res = ptn.findall(self.formula)
+
+        # 将公式进行合并多项式
+        res = np.unique(res)
+        for r in res:
+            exec('var%s = sympy.Symbol("var%s")' % (r, r))
+        self.formula = str(sympy.expand(self.formula))
+
 
         if len(self.cmd_list) != len(res):
             raise Exception(u'变量个数与公式中的变量个数不一致')
 
         self.conn = pymongo.MongoClient(host='localhost', port=27017)
         self.db = self.conn['FuturesDailyWind']
-
-        self.conn_mysql = connector.connect(user='root', password='cbnb888')
-
 
         if needFex:
             self.exchange = self.getForeignCurrency()
@@ -45,19 +50,22 @@ class deviation(object):
 
 
     def getForeignCurrency(self):
-        self.conn_mysql.database = 'macroeco'
-        cursor = self.conn_mysql.cursor()
 
-        sql = 'select date, name, value from currency where name="中间价:美元兑人民币" order by date'
-        cursor.execute(sql)
-        res = cursor.fetchall()
+        db = self.conn['EDBWind']
+        collection = db['FX']
 
-        dt = [r[0] for r in res]
-        val = [r[2] for r in res]
+        queryArgs = {'edb_name': '即期汇率:美元兑人民币'}
+        projectionField = ['date', 'CLOSE']
+        searchRes = collection.find(queryArgs, projectionField).sort('date', pymongo.ASCENDING)
 
-        df = pd.DataFrame({'汇率': val}, index=dt)
+        dt = []
+        cls = []
+        for r in searchRes:
+            dt.append(r['date'])
+            cls.append(r['CLOSE'])
+
+        df = pd.DataFrame({'汇率': cls}, index=dt)
         return df
-
 
     @staticmethod
     def date_list():
@@ -101,6 +109,7 @@ class deviation(object):
     def spotData(self, file_nm, spot_list):
 
         # spot_list的顺序与公式中变量的顺序是一致的
+        # spotData里还有些问题，如果是用外盘数据的话
 
         if not file_nm.endswith('.csv'):
             file_nm += '.csv'
@@ -114,9 +123,23 @@ class deviation(object):
 
         formula = self.formula
         for i in range(n):
-            formula = formula.replace('var%d' % (i + 1), 'df_spot["%s"]' % spot_list[i])
+            if spot_list[i] == '汇率':
+                exec ('fex = self.getForeignCurrency()')
+                formula = formula.replace('var%d' % (i + 1), 'fex["汇率"]')
+            else:
+                formula = formula.replace('var%d' % (i + 1), 'df_spot["%s"]' % spot_list[i])
 
         df_spot['price_diff'] = eval(formula)
+
+        formulaCap = formula.replace('-', '+')
+        formula_split = formulaCap.split('+')
+
+        for part in formula_split:
+            if 'df_spot' not in part:
+                formula_split.remove(part)
+        formulaCap = '+'.join(formula_split)
+        df_spot['capital'] = eval(formulaCap)
+
         return df_spot
 
     # def futuresData(self):
@@ -136,7 +159,6 @@ class deviation(object):
     def futuresMain(self):
 
         df_futures = pd.DataFrame()
-
         formula = self.formula
         for i in range(len(self.cmd_list)):
             if self.cmd_list[i] == '汇率':
@@ -152,12 +174,21 @@ class deviation(object):
                 else:
                     df_futures = df_futures.join(df_temp, how='outer')
         df_futures['price_diff'] = eval(formula)
+
+        formulaCap = formula.replace('-', '+')
+        formula_split = formulaCap.split('+')
+        for part in formula_split:
+            if 'contract' not in part:
+                formula_split.remove(part)
+        formulaCap = '+'.join(formula_split)
+        df_futures['capital'] = eval(formulaCap)
+
         return df_futures
 
     def season_devi(self, df, rtn_len):
 
         # 传入的参数df是dataframe
-        price_diff = df[['price_diff']].copy()
+        price_diff = df[['price_diff', 'capital']].copy()
         price_diff.dropna(inplace=True)
 
         df_index = price_diff.index
@@ -194,11 +225,11 @@ class deviation(object):
         price_diff = price_diff.join(df_season, how='left')
         price_diff['profit'] = price_diff['season_mean'] - price_diff['price_diff']
 
-        df_col = df.columns.tolist()
-        df_col.remove('price_diff')
-        price_diff['avg_price'] = df[df_col].mean(axis=1)
+        # df_col = df.columns.tolist()
+        # df_col.remove('price_diff')
+        # price_diff['avg_price'] = df[df_col].mean(axis=1)
 
-        price_diff['profit_rate'] = price_diff['profit'] / price_diff['avg_price']
+        price_diff['profit_rate'] = price_diff['profit'] / price_diff['capital']
 
         price_diff['profit_rate_mean'] = price_diff[['profit_rate']].rolling(window=rtn_len, min_periods=rtn_len-10).mean()
         price_diff['profit_rate_std'] = price_diff[['profit_rate']].rolling(window=rtn_len, min_periods=rtn_len-10).std()
@@ -296,7 +327,6 @@ class deviation(object):
         ax = plt.gca()
         ax2 = plt.twinx()
         df_plot['price_diff'].plot(color='r')
-        print df_plot['price_diff'].tolist()
         plt.grid()
         plt.legend()
 
@@ -347,7 +377,6 @@ class deviation(object):
                   tooltip_trigger='axis')
 
         return overlap, line3
-
 
     def basisData(self, file_nm, spot_list):
         spot = self.spotData(file_nm, spot_list)[['price_diff']]
@@ -416,19 +445,22 @@ if __name__ == '__main__':
 
 
 
-    formula = "var1 - var2 "
+    formula = "var1 - var2 + 3 * var2 - 3 * var2 * var3"
     # formula2 =
 
-    a = deviation(cmd_list=['L.DCE', 'PP.DCE'], formula=formula, needFex=0)
+    a = deviation(cmd_list=['L.DCE', 'PP.DCE', '汇率'], formula=formula, needFex=0)
+    # a.getForeignCurrency()
+    # a.futuresMain()
+    a.season_devi(a.spotData('raw_data', spot_list=['LL神华', 'PP华东', '汇率']), 60)
     # print a.season_devi(df=a.futuresMain(), rtn_len=60)
     # print a.futuresMain()
-    # a.plot_devi_price(df=a.futuresMain(), rtn_len=60, corr_len=60, mode='trend')
+    # a.plot_devi_price(df=a.futuresMain(), rtn_len=60, corr_len=60, mode='season')
     # plt.show()
-    a.echart_devi_price(a.futuresMain(), rtn_len=60, corr_len=60)
+    # a.echart_devi_price(a.futuresMain(), rtn_len=60, corr_len=60)
     # a.plot_devi_price(a.futuresMain(), 60, 60)
 
     # a = deviation(cmd_list=['BU.SHF', 'TA.CZC'], formula=formula, needFex=0)
-    # print a.spotData('raw_data', spot_list=['LL神华', 'PP华东'])
+    # a.spotData('raw_data', spot_list=['LL神华', 'PP华东'])
     # print a.get_price_wind(collection='TA.CZC_Daily', wind_code='TA901.CZC')
     # print a.same_month_combine('TA.CZC', '01')
     # a.seasonal_generator(a.futuresMain())
@@ -473,4 +505,4 @@ if __name__ == '__main__':
     # a.plot_devi_price(b1, rtn_len=90, corr_len=90, mode='season')
     # c1 = a.spotData('raw_data', spot_list=['LL神华', 'PP华东'])
     # a.plot_devi_price(c1, rtn_len=90, corr_len=90, mode='season')
-    # plt.show()
+    plt.show()
