@@ -39,7 +39,6 @@ class deviation(object):
             raise Exception(u'变量个数与公式中的变量个数不一致')
 
         self.conn = pymongo.MongoClient(host='localhost', port=27017)
-        self.db = self.conn['FuturesDailyWind']
 
         if needFex:
             self.exchange = self.getForeignCurrency()
@@ -157,7 +156,8 @@ class deviation(object):
             #         exec('df%d = df%d.join(dftemp, how="outer")' % (i, i))
 
     def futuresMain(self):
-
+        # 该函数是从数据库中抓取wind的主力合约数据
+        # WIND的主力合约是根据持仓量进行换月的。
         df_futures = pd.DataFrame()
         formula = self.formula
         for i in range(len(self.cmd_list)):
@@ -165,7 +165,12 @@ class deviation(object):
                 exec('contract%d = self.getForeignCurrency()' % i)
                 formula = formula.replace('var%d' % (i + 1), 'contract%d["汇率"]' % i)
             else:
-                exec('contract%d = self.get_price(collection="%s", wind_code="%s")' % (i, self.cmd_list[i] + '_Daily', self.cmd_list[i]))
+                if self.cmd_list[i] in WIND_DB:
+                    exec('contract%d = self.get_price(db="FuturesDailyWind", collection="%s", code="%s")' %
+                         (i, self.cmd_list[i] + '_Daily', self.cmd_list[i]))
+                elif self.cmd_list[i] in RT_DB:
+                    exec ('contract%d = self.get_price(db="FuturesDailyRT", collection="Oil", code="%s")' %
+                          (i, self.cmd_list[i] + 'c1'))
                 formula = formula.replace('var%d' % (i + 1), 'contract%d["close"]' % i)
                 df_temp = eval('contract%d' % i).copy()
                 df_temp.rename({'close': self.cmd_list[i]}, axis='columns', inplace=True)
@@ -186,7 +191,6 @@ class deviation(object):
         return df_futures
 
     def season_devi(self, df, rtn_len):
-
         # 传入的参数df是dataframe
         price_diff = df[['price_diff', 'capital']].copy()
         price_diff.dropna(inplace=True)
@@ -256,8 +260,8 @@ class deviation(object):
     def same_month_combine(self, cmd, month):
         # 相同月份的价格进行拼接，不过对于一些有两年合约的品种会有问题。
         # cmd是品种，如'TA.CZC'；month是月份，如'01'
-
-        col = self.db[cmd + '_Daily']
+        db = self.conn['FuturesDailyWind']
+        col = db[cmd + '_Daily']
         res = col.distinct('wind_code', filter={'wind_code':{'$regex': '.*%s(?=\.)' % month}})
         res.sort(reverse=False)
         df = pd.DataFrame()
@@ -269,15 +273,19 @@ class deviation(object):
         df.rename(lambda x: x + '_' + month + '_' + cmd, axis='columns', inplace=True)
         return df
 
-    def get_price(self, collection, wind_code):
+    def get_price(self, db, collection, code):
 
-        """collection是集合的名字, wind_code是WIND代码，该函数用于调取期货合约的收盘价"""
+        """db是数据库，collection是集合, code是代码，该函数用于调取期货合约的收盘价"""
+        if db == 'FuturesDailyWind':
+            queryCode = 'wind_code'
+        elif db == 'FuturesDailyRT':
+            queryCode = 'tr_code'
 
-        # if 'db' not in vars(self) or self.db.name != 'FuturesDailyWind':
-        #     self.db = self.conn['FuturesDailyWind']
+        dbs = self.conn[db]
+        col = dbs[collection]
 
-        col = self.db[collection]
-        queryArgs = {'wind_code': wind_code}
+
+        queryArgs = {queryCode: code}
         projectionField = ['date', 'CLOSE']
         res = col.find(queryArgs, projectionField).sort('date', pymongo.ASCENDING)
 
@@ -293,9 +301,8 @@ class deviation(object):
 
     def get_future_end_date(self, wind_code):
 
-        # if 'db' not in vars(self) or self.db.name != 'FuturesDailyWind':
-        #     self.db = self.conn['FuturesDailyWind']
-        col = self.db['FuturesInfo']
+        db = self.conn['FuturesDailyWind']
+        col = db['FuturesInfo']
         queryArgs = {'wind_code': wind_code}
         projectionField = ['last_trade_date']
         res = col.find(queryArgs, projectionField)
@@ -448,12 +455,12 @@ if __name__ == '__main__':
     formula = "var1 - var2 + 3 * var2 - 3 * var2 * var3"
     # formula2 =
 
-    a = deviation(cmd_list=['L.DCE', 'PP.DCE', '汇率'], formula=formula, needFex=0)
+    a = deviation(cmd_list=['B.IPE', 'LCO', '汇率'], formula=formula, needFex=0)
     # a.getForeignCurrency()
     # a.futuresMain()
-    a.season_devi(a.spotData('raw_data', spot_list=['LL神华', 'PP华东', '汇率']), 60)
+    # a.plot_devi_price(a.spotData('raw_data', spot_list=['LL神华', 'PP华东', '汇率']), 60, 60)
     # print a.season_devi(df=a.futuresMain(), rtn_len=60)
-    # print a.futuresMain()
+    print a.futuresMain()
     # a.plot_devi_price(df=a.futuresMain(), rtn_len=60, corr_len=60, mode='season')
     # plt.show()
     # a.echart_devi_price(a.futuresMain(), rtn_len=60, corr_len=60)
